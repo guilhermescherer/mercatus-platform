@@ -28,10 +28,10 @@ o comando de inicialização com os padrões, a partir da sua própria pasta.
 | `POSTGRES_DB` | `mercatus` | Database inicial neutro |
 | `POSTGRES_PORT` | `5432` | Porta publicada no host |
 
-O script `compose/initdb/01-create-databases.sql` cria `catalog`, `customer` e
-`inventory` e concede privilégios ao usuário `mercatus`. Portanto, trocar
+O script `compose/initdb/01-create-databases.sql` cria `catalog`, `customer`,
+`inventory` e `order` e concede privilégios ao usuário `mercatus`. Portanto, trocar
 `POSTGRES_USER` exige ajustar também esse script; `POSTGRES_DB` deve ser diferente
-dos três databases criados por ele. Alterar essas variáveis não reconfigura um
+dos quatro databases criados por ele. Alterar essas variáveis não reconfigura um
 volume já inicializado. Se mudar a porta, ajuste as URLs JDBC dos serviços.
 
 O container se chama `mercatus-postgres`, armazena dados no volume nomeado
@@ -62,6 +62,17 @@ provisiona os databases; as tabelas são criadas pelo Flyway ao iniciar cada
 serviço. O Inventory atual inicializa seu schema em banco vazio, conforme seu
 [README](../mercatus-inventory-service/README.md).
 
+Se `order` estiver ausente, crie somente esse database no volume existente:
+
+```bash
+docker compose -f compose/docker-compose.yml --profile core exec postgres psql -U mercatus -d mercatus -c 'CREATE DATABASE "order";'
+docker compose -f compose/docker-compose.yml --profile core exec postgres psql -U mercatus -d mercatus -c 'GRANT ALL PRIVILEGES ON DATABASE "order" TO mercatus;'
+```
+
+As aspas duplas preservam o nome SQL `order`. Não recrie nem apague o volume
+para acrescentar o banco. O [Order](../mercatus-order-service/README.md) aplica
+`V1__order.sql` e valida o schema ao iniciar.
+
 ## Operação local
 
 ```bash
@@ -75,7 +86,7 @@ pressupõem que o arquivo foi criado no passo inicial.
 
 ## Limites atuais
 
-- Catalog, Customer e Inventory usam por padrão a mesma credencial local
+- Catalog, Customer, Inventory e Order usam por padrão a mesma credencial local
   `mercatus`; o isolamento por role de serviço será implementado conforme
   [ADR-0014](../docs/adr/0014-isolamento-banco-por-credencial.md).
 - O Compose contém apenas o perfil `core`; Kafka, outbox e inbox entram na
