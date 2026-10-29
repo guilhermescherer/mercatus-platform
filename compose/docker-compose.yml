@@ -18,5 +18,123 @@ services:
       timeout: 3s
       retries: 10
 
+  # ----------------------------------------------------------------------------
+  # Kafka: um "correio de mensagens" entre os serviços. Um serviço deixa uma
+  # mensagem num "tópico" (uma caixa de mensagens com nome) e outro serviço lê de
+  # lá, no seu próprio ritmo. Assim eles conversam sem chamar um ao outro direto.
+  #
+  # "Broker" é o servidor do Kafka que guarda os tópicos e entrega as mensagens.
+  # Aqui subimos 1 broker só, o suficiente para desenvolver na sua máquina.
+  #
+  # "KRaft" é o modo novo do Kafka de funcionar sozinho. Antes, o Kafka precisava
+  # de outro programa junto (o Zookeeper) para se organizar; hoje ele faz isso
+  # internamente, então não precisamos subir um segundo container.
+  # ----------------------------------------------------------------------------
+  kafka:
+    image: apache/kafka:3.9.0
+    profiles: ["events"]
+    container_name: mercatus-kafka
+    environment:
+      # Nome/número deste broker. Como só temos um, é 1.
+      KAFKA_NODE_ID: 1
+      # O mesmo processo faz dois trabalhos ao mesmo tempo:
+      # - "broker": guardar e entregar as mensagens;
+      # - "controller": tomar conta da organização interna do cluster.
+      # Em produção esses trabalhos ficam em máquinas separadas; aqui, para
+      # economizar recursos, ficam juntos.
+      KAFKA_PROCESS_ROLES: broker,controller
+
+      # ---- Endereços: a parte que mais confunde no Kafka ----
+      # Existem dois endereços no mundo deste Compose:
+      # - "localhost"  = a SUA máquina (onde você roda os serviços Java à mão);
+      # - "kafka"      = o nome deste container visto por OUTROS containers.
+      #
+      # Criamos 3 "portas de entrada" (listeners), cada uma para um caso:
+      # - CONTROLLER: uso interno do Kafka (a parte "controller" acima). Não é para
+      #   você nem para os serviços; por isso fica escondida em localhost.
+      # - HOST: para os serviços Java rodando na SUA máquina se conectarem.
+      # - INTERNAL: para OUTROS containers (se um dia um serviço rodar em container).
+      #
+      # KAFKA_LISTENERS = em quais portas o Kafka FICA ESCUTANDO aqui dentro.
+      # (0.0.0.0 quer dizer "aceite conexões de qualquer lugar nesta porta".)
+      KAFKA_LISTENERS: CONTROLLER://localhost:9093,HOST://0.0.0.0:9092,INTERNAL://0.0.0.0:29092
+      # KAFKA_ADVERTISED_LISTENERS = o endereço que o Kafka RESPONDE para o cliente
+      # usar na hora de se conectar de verdade. Quem vem pela porta HOST recebe
+      # "localhost:9092"; quem vem pela INTERNAL recebe "kafka:29092".
+      # Se esse endereço estiver errado, o cliente "acha" o Kafka mas não consegue
+      # falar com ele — é o erro de conexão mais comum para quem começa.
+      KAFKA_ADVERTISED_LISTENERS: HOST://localhost:${KAFKA_PORT:-9092},INTERNAL://kafka:29092
+      # Diz que todas as portas acima são "sem segurança" (PLAINTEXT), ou seja, sem
+      # senha nem criptografia. Serve só para desenvolvimento local.
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,HOST:PLAINTEXT,INTERNAL:PLAINTEXT
+      # Diz qual das portas acima é a de uso interno do Kafka (o "controller").
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # Quem cuida da organização interna. Como só há um broker, ele aponta para si
+      # mesmo. O formato é "número-do-nó@endereço:porta".
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      # Qual porta os brokers usam para conversar entre si. Com um broker só isso
+      # quase não é usado, mas o Kafka exige que esteja definido.
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+
+      # "Replicar" é guardar cópias da mesma mensagem em vários brokers, para não
+      # perder nada se um cair. Como só temos 1 broker, não dá para fazer cópias,
+      # então todos esses valores são 1 (uma cópia única). Em produção seriam 3.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # Tira uma espera que o Kafka faz por padrão antes de começar a entregar
+      # mensagens a um grupo de leitores. Zero deixa o start local mais rápido.
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Não deixa o Kafka inventar tópicos sozinho. Só devem existir os tópicos que
+      # criamos de propósito (logo abaixo, no serviço kafka-topics).
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      # Limita a memória que o Kafka usa (entre 256 MB e 512 MB), para caber numa
+      # máquina de 16 GB sem sufocar o resto.
+      KAFKA_HEAP_OPTS: "-Xms256m -Xmx512m"
+    ports:
+      # Abre a porta do Kafka (9092) para a sua máquina poder se conectar.
+      - "${KAFKA_PORT:-9092}:9092"
+    volumes:
+      # Guarda as mensagens em disco, para elas não sumirem quando o container
+      # reinicia.
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      # Como o Compose sabe que o Kafka "está pronto": ele tenta listar os tópicos.
+      # Se o comando responde, o broker está de pé.
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # ----------------------------------------------------------------------------
+  # Container auxiliar de uso único: ele espera o Kafka ficar pronto, cria os
+  # tópicos (as "caixas de mensagens") que os serviços vão usar, e então encerra.
+  # Depois de rodar, some da lista de serviços ativos (fica como "Exited (0)").
+  # ----------------------------------------------------------------------------
+  kafka-topics:
+    image: apache/kafka:3.9.0
+    profiles: ["events"]
+    container_name: mercatus-kafka-topics
+    depends_on:
+      kafka:
+        # Só começa depois que o Kafka passou no healthcheck acima.
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      # Cria os dois tópicos da reserva de estoque:
+      # - inventory.commands.v1: onde o Order deixa o pedido de reserva (comando);
+      # - inventory.events.v1:   onde o Inventory deixa a resposta.
+      # "--if-not-exists" evita erro se o tópico já existir (pode rodar de novo
+      # sem problema). "--partitions 1" e "--replication-factor 1" são o mínimo,
+      # adequado para um broker local. Ele se conecta pelo nome interno
+      # "kafka:29092" porque está dentro da rede dos containers.
+      - |
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --if-not-exists --topic inventory.commands.v1 --partitions 1 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --if-not-exists --topic inventory.events.v1 --partitions 1 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --list
+    # Não reinicia sozinho: a tarefa dele é só criar os tópicos uma vez.
+    restart: "no"
+
 volumes:
   postgres-data:
+  kafka-data:
