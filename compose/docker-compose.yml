@@ -31,7 +31,7 @@ services:
   # internamente, então não precisamos subir um segundo container.
   # ----------------------------------------------------------------------------
   kafka:
-    image: apache/kafka:3.9.0
+    image: apache/kafka:3.9.1
     profiles: ["events"]
     container_name: mercatus-kafka
     environment:
@@ -112,7 +112,7 @@ services:
   # Depois de rodar, some da lista de serviços ativos (fica como "Exited (0)").
   # ----------------------------------------------------------------------------
   kafka-topics:
-    image: apache/kafka:3.9.0
+    image: apache/kafka:3.9.1
     profiles: ["events"]
     container_name: mercatus-kafka-topics
     depends_on:
