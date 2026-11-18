@@ -3,7 +3,8 @@
 Infraestrutura local compartilhada do Mercatus. O perfil Compose `core` fornece
 um PostgreSQL 17, com um database por serviço. O perfil `events` fornece um
 broker Apache Kafka em modo KRaft (nó único, sem Zookeeper) e cria os tópicos da
-saga. As aplicações Java são iniciadas separadamente em seus próprios
+saga. O perfil `security` fornece o Keycloak, provedor de identidade que emite os
+tokens JWT validados pelos serviços. As aplicações Java são iniciadas separadamente em seus próprios
 repositórios.
 
 ## Pré-requisitos e execução
@@ -42,11 +43,14 @@ o comando de inicialização com os padrões, a partir da sua própria pasta.
 | `POSTGRES_DB` | `mercatus` | Database inicial neutro |
 | `POSTGRES_PORT` | `5432` | Porta publicada no host |
 | `KAFKA_PORT` | `9092` | Porta do broker Kafka publicada no host (perfil `events`) |
+| `KEYCLOAK_PORT` | `8180` | Porta do Keycloak publicada no host (perfil `security`); faz parte do issuer dos tokens |
+| `KEYCLOAK_ADMIN` | `admin` | Usuário do console administrativo (realm `master`) |
+| `KEYCLOAK_ADMIN_PASSWORD` | `admin` | Senha desse usuário |
 
 O script `compose/initdb/01-create-databases.sql` cria `catalog`, `customer`,
-`inventory` e `order` e concede privilégios ao usuário `mercatus`. Portanto, trocar
+`inventory`, `order` e `keycloak` e concede privilégios ao usuário `mercatus`. Portanto, trocar
 `POSTGRES_USER` exige ajustar também esse script; `POSTGRES_DB` deve ser diferente
-dos quatro databases criados por ele. Alterar essas variáveis não reconfigura um
+dos databases criados por ele. Alterar essas variáveis não reconfigura um
 volume já inicializado. Se mudar a porta, ajuste as URLs JDBC dos serviços.
 
 O container se chama `mercatus-postgres`, armazena dados no volume nomeado
@@ -129,12 +133,89 @@ O volume nomeado `kafka-data` preserva os logs do broker entre reinícios. Os
 testes Testcontainers dos serviços criam seus próprios brokers e não dependem
 deste Compose.
 
+## Perfil `security` (Keycloak)
+
+O perfil `security` sobe o Keycloak 26 em modo de desenvolvimento (HTTP, sem
+TLS), com heap limitado a 512 MB. Ele guarda usuários e configurações no
+database `keycloak` do Postgres, por isso exige também o perfil `core`:
+
+```bash
+docker compose -f compose/docker-compose.yml --profile core --profile security config --quiet
+docker compose -f compose/docker-compose.yml --profile core --profile security up -d --wait
+```
+
+Em um volume do Postgres criado antes deste perfil, crie o database uma vez,
+como descrito em [Bancos e volumes existentes](#bancos-e-volumes-existentes):
+
+```bash
+docker compose -f compose/docker-compose.yml --profile core exec postgres psql -U mercatus -d mercatus -c 'CREATE DATABASE keycloak;'
+docker compose -f compose/docker-compose.yml --profile core exec postgres psql -U mercatus -d mercatus -c 'GRANT ALL PRIVILEGES ON DATABASE keycloak TO mercatus;'
+```
+
+O console administrativo fica em `http://localhost:8180/admin` (usuário e senha
+`admin`, no realm `master`). O healthcheck consulta `/health/ready` na porta de
+gestão 9000, interna ao container.
+
+### Realm `mercatus`
+
+O realm é versionado em `compose/keycloak/mercatus-realm.json` e importado na
+subida (`--import-realm`). O issuer dos tokens é
+`http://localhost:8180/realms/mercatus`; os serviços rodando no host usam esse
+valor para validar os tokens.
+
+| Item | Valor |
+|---|---|
+| Papéis de realm | `CUSTOMER`, `OPERATOR`, `ADMIN` (composto: inclui `OPERATOR`), `SERVICE` |
+| Usuários de teste | `customer1`, `customer2` (`CUSTOMER`), `operator` (`OPERATOR`), `admin` (`ADMIN`); senha igual ao usuário |
+| Cliente `mercatus-cli` | público, para obter tokens de usuário: fluxo padrão com PKCE (callback do Postman) e *direct access grants* |
+| Cliente `order-service` | confidencial, só *service accounts* (client credentials), papel `SERVICE`, secret `order-service-dev-secret` |
+| Validade do access token | 5 minutos |
+
+Os papéis chegam no token em `realm_access.roles`. Como `ADMIN` é composto, o
+token do administrador traz `ADMIN` e `OPERATOR`.
+
+As senhas, o secret e o *direct access grants* (password grant, fora do OAuth
+2.1) existem apenas para o laboratório local: não há frontend, e scripts e
+coleções HTTP precisam obter tokens diretamente.
+
+Para obter um token de usuário e um token de serviço:
+
+```bash
+curl -s http://localhost:8180/realms/mercatus/protocol/openid-connect/token \
+  -d grant_type=password -d client_id=mercatus-cli \
+  -d username=customer1 -d password=customer1
+
+curl -s http://localhost:8180/realms/mercatus/protocol/openid-connect/token \
+  -d grant_type=client_credentials -d client_id=order-service \
+  -d client_secret=order-service-dev-secret
+```
+
+O campo `access_token` da resposta vai no header `Authorization: Bearer <token>`.
+
+### Alterar o realm
+
+A importação só acontece quando o realm ainda não existe; nas subidas seguintes
+o log mostra `Realm 'mercatus' already exists. Import skipped`. Para aplicar uma
+mudança feita no arquivo, apague o realm `mercatus` pelo console e reinicie o
+Keycloak, ou recrie o database `keycloak`:
+
+```bash
+docker compose -f compose/docker-compose.yml --profile core --profile security stop keycloak
+docker compose -f compose/docker-compose.yml --profile core exec postgres psql -U mercatus -d mercatus -c 'DROP DATABASE keycloak;' -c 'CREATE DATABASE keycloak;'
+docker compose -f compose/docker-compose.yml --profile core --profile security up -d --wait keycloak
+```
+
+Recriar o database apaga usuários criados manualmente e gera novos `sub` para os
+usuários de teste.
+
 ## Limites atuais
 
 - Catalog, Customer, Inventory e Order usam por padrão a mesma credencial local
   `mercatus`; o isolamento por role de serviço (uma credencial por serviço) será
   implementado nas fases de infraestrutura.
-- O Compose fornece os perfis `core` (Postgres) e `events` (Kafka). RabbitMQ e
-  demais dependências entram nas fases que os exigem.
+- O Compose fornece os perfis `core` (Postgres), `events` (Kafka) e `security`
+  (Keycloak). RabbitMQ e demais dependências entram nas fases que os exigem.
+- O issuer usa `localhost:8180`, adequado a serviços rodando no host. Serviços
+  dentro da rede do Compose não alcançariam esse endereço.
 - Os testes Testcontainers dos serviços criam seus próprios containers e não
   dependem deste Compose estar iniciado.
