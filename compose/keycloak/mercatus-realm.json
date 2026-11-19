@@ -1,0 +1,93 @@
+{
+  "realm": "mercatus",
+  "enabled": true,
+  "sslRequired": "external",
+  "accessTokenLifespan": 300,
+  "registrationAllowed": false,
+  "roles": {
+    "realm": [
+      { "name": "CUSTOMER", "description": "Customer buying from the store" },
+      { "name": "OPERATOR", "description": "Operations staff: orders, stock, failures" },
+      {
+        "name": "ADMIN",
+        "description": "Administrator: everything an operator does plus catalog management",
+        "composite": true,
+        "composites": { "realm": ["OPERATOR"] }
+      },
+      { "name": "SERVICE", "description": "Internal service account calling other services" }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "mercatus-cli",
+      "name": "Mercatus local CLI and Postman",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "redirectUris": ["https://oauth.pstmn.io/v1/callback", "http://localhost/*"],
+      "webOrigins": [],
+      "attributes": { "pkce.code.challenge.method": "S256" }
+    },
+    {
+      "clientId": "order-service",
+      "name": "Order service",
+      "enabled": true,
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "order-service-dev-secret",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true
+    }
+  ],
+  "users": [
+    {
+      "username": "customer1",
+      "email": "customer1@mercatus.local",
+      "firstName": "Customer",
+      "lastName": "One",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [{ "type": "password", "value": "customer1", "temporary": false }],
+      "realmRoles": ["CUSTOMER"]
+    },
+    {
+      "username": "customer2",
+      "email": "customer2@mercatus.local",
+      "firstName": "Customer",
+      "lastName": "Two",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [{ "type": "password", "value": "customer2", "temporary": false }],
+      "realmRoles": ["CUSTOMER"]
+    },
+    {
+      "username": "operator",
+      "email": "operator@mercatus.local",
+      "firstName": "Store",
+      "lastName": "Operator",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [{ "type": "password", "value": "operator", "temporary": false }],
+      "realmRoles": ["OPERATOR"]
+    },
+    {
+      "username": "admin",
+      "email": "admin@mercatus.local",
+      "firstName": "Store",
+      "lastName": "Admin",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [{ "type": "password", "value": "admin", "temporary": false }],
+      "realmRoles": ["ADMIN"]
+    },
+    {
+      "username": "service-account-order-service",
+      "enabled": true,
+      "serviceAccountClientId": "order-service",
+      "realmRoles": ["SERVICE"]
+    }
+  ]
+}
